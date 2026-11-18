@@ -58,8 +58,13 @@ docs/              ARCHITECTURE.md, CONFIGURATION.md, STORMCOS-NOTES.md, researc
 - [x] test container: short, medium, long (test/)
 - [x] docs: README diagram, ARCHITECTURE, STORMCOS-NOTES, what the test proves
 - [x] sc-build green with `deploy/check.sh` (clippy -D warnings); Cargo.lock committed
-- [ ] BLOCKED, owner decision: no UID assignment on stormcos — a pod with runAsNonRoot,
-      no runAsUser and a config-less registry image runs as uid 0 and is refused
-      (rustkube-node image_config.rs). Question + recommendation (A: platform UID ranges) on #1, wait-owner set; rustkube#70 (SCC scope). Filed rustkube#320 (namespace metadata.name label).
+- [x] UID decision (master, 2026-11-18): A — the platform assigns UIDs as restricted-v2
+      (rustkube#321, P0). The app pins nothing; the test names rustkube#321 as the gap
+      when pods are refused as root, and passes as written once a release carries it.
+- [ ] stormlb as the edge (master, 2026-11-18; stormlb#37): LoadBalancer address from stormlb,
+      HTTPRoute as the backend config (`/` → web, `/api/` → api, weights, readiness as health),
+      test proves spread over both edge pods and every web/api pod (LB address and route),
+      a web pod killed with no failed request on either, the route's pool following 3→6→3,
+      the route's status read back; where stormlb is not there the test names stormlb#37.
 - [ ] registry entry `stormstorefront` (kind binaries) — asked of the master (note, 2026-11-18); proof wording: test report, not namespaces/storefront (asked too)
 - [ ] image build, test run on pvetest, shipped with proof
