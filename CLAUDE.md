@@ -66,7 +66,7 @@ docs/              ARCHITECTURE.md, CONFIGURATION.md, STORMCOS-NOTES.md, researc
       test proves spread over both edge pods and every web/api pod (LB address and route),
       a web pod killed with no failed request on either, the route's pool following 3→6→3,
       the route's status read back; where stormlb is not there the test names stormlb#37.
-- [ ] BLOCKED (item proposed --after rustkube#321): the medium test cannot pass on a node until a
+- [ ] BLOCKED (item proposed --after rustkube#321 and stormlb#37, 2026-11-18): the medium test cannot pass on a node until a
       release carries rustkube#321 (UID) and stormlb#37 (address, route rules); it reports them as gaps.
-- [ ] registry entry `stormstorefront` (kind binaries) — asked of the master (note, 2026-11-18); proof wording: test report, not namespaces/storefront (asked too)
+- [ ] registry entry `stormstorefront` (kind binaries) — asked of the master (note, 2026-11-18; re-sent with the exact command); proof wording: test report, not namespaces/storefront (asked too)
 - [ ] image build, test run on pvetest, shipped with proof
