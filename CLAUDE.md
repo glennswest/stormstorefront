@@ -52,11 +52,14 @@ docs/              ARCHITECTURE.md, STORMCOS-NOTES.md
 ## Work plan
 
 ### #1 — the storefront on stormcos (P0)
-- [ ] Rust binary with every role
-- [ ] manifests (same topology as the original, stormcos substitutions)
-- [ ] validate (Rust) + scripts/validate.sh, smoke-test.sh, deploy.sh, Makefile
-- [ ] test container: short (offline + API kinds), medium (deploy, wait, smoke,
-      disruption, teardown, nothing left), long (medium in waves)
-- [ ] docs: README diagram, ARCHITECTURE, STORMCOS-NOTES, what the test proves
-- [ ] sc-build green (zero warnings, clippy -D warnings)
-- [ ] registry entry (owner's setting: note to the master), image build, test run on pvetest
+- [x] Rust binary with every role (src/), 29 unit tests
+- [x] manifests (same topology as the original, stormcos substitutions)
+- [x] validate (Rust) + scripts/validate.sh, smoke-test.sh, deploy.sh, make-secrets.sh, Makefile
+- [x] test container: short, medium, long (test/)
+- [x] docs: README diagram, ARCHITECTURE, STORMCOS-NOTES, what the test proves
+- [ ] sc-build green with `deploy/check.sh` (clippy -D warnings); commit Cargo.lock
+- [ ] BLOCKED, owner decision: no UID assignment on stormcos — a pod with runAsNonRoot,
+      no runAsUser and a config-less registry image runs as uid 0 and is refused
+      (rustkube-node image_config.rs). Options on the issue; rustkube#70 (SCC scope).
+- [ ] registry entry `stormstorefront` (kind binaries) — the master runs `component add`
+- [ ] image build, test run on pvetest, shipped with proof

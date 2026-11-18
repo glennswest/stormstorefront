@@ -302,10 +302,8 @@ pub fn validate(files: &[(String, String)], roles: &[&str]) -> Report {
                 "Deployment" | "StatefulSet" | "DaemonSet" | "Job" => check_workload(&doc, roles, &mut r),
                 "ConfigMap" => check_configmap(&doc, &mut r),
                 "Secret" => check_secret(&doc, &mut r),
-                "Namespace" => {
-                    if s(&doc["metadata"]["labels"]["pod-security.kubernetes.io/enforce"]) != "restricted" {
-                        r.errors.push(format!("{file}: namespace {name} does not enforce pod-security restricted"));
-                    }
+                "Namespace" if s(&doc["metadata"]["labels"]["pod-security.kubernetes.io/enforce"]) != "restricted" => {
+                    r.errors.push(format!("{file}: namespace {name} does not enforce pod-security restricted"));
                 }
                 _ => {}
             }
