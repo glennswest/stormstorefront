@@ -1,0 +1,13 @@
+# stormstorefront-test: the test image, per stormcentral docs/test-standard.md.
+# One image for every suite: the Job runs `/test short|medium|long`.
+#
+# test/build.sh builds the static (musl) binary on the build box and stages
+# it in test/.stage/; this packages it. It needs nothing under it: it talks
+# HTTPS to the apiserver (verified with the ServiceAccount's ca.crt) and HTTP
+# to the storefront it deploys, so the image is scratch.
+#
+# The build context is the repo root (the standard's).
+FROM scratch
+LABEL storm.io/test-of="stormstorefront"
+COPY test/.stage/stormstorefront-test /test
+ENTRYPOINT ["/test"]

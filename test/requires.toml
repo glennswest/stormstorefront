@@ -1,0 +1,35 @@
+# What stormstorefront's suites need on a test machine, read by stormcentral's
+# runner at the commit it tests (stormcentral docs/test-standard.md).
+#
+# No hardware is required: the storefront runs on any stormcos node (it is
+# the workload every test machine runs). The runner's own Role covers the
+# run's namespace; the medium and long suites deploy the storefront into a
+# project of its own beside it (`extra_namespaces`), with the same rights,
+# labelled with the run and removed with it. Nothing is fetched from outside:
+# every container runs the node's `stormstorefront` image.
+
+[project]
+supports = ">= 0.1, < 1"
+# A result depends on the platform the storefront exercises.
+depends_on = ["rustkube", "rustkube-node", "stormpump", "stormblock", "stormblock-csi", "stormlb", "cilium", "registry"]
+# The release gate: the offline checks and the full deploy-and-prove.
+required = ["short", "medium"]
+
+# Offline validation and the apiserver serving every kind the manifests use.
+[short]
+
+# Deploy, prove, disrupt, tear down, prove nothing is left.
+[medium]
+extra_namespaces = ["storefront"]
+cluster_read = [
+    { apiGroup = "", resource = "persistentvolumes" },
+    { apiGroup = "storage.storm.io", resource = "volumes" },
+]
+
+# As medium, with the disruptions repeated in five timed waves.
+[long]
+extra_namespaces = ["storefront"]
+cluster_read = [
+    { apiGroup = "", resource = "persistentvolumes" },
+    { apiGroup = "storage.storm.io", resource = "volumes" },
+]
