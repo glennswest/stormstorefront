@@ -373,12 +373,15 @@ impl Ctx {
     }
 }
 
+/// A deploy stage: its test name, the files it applies, the apps it waits for (and how many pods).
+type Stage = (&'static str, &'static [&'static str], &'static [(&'static str, usize)]);
+
 const READY_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn deploy(t: &mut Tally, c: &mut Ctx) -> bool {
     // Dependency order, as scripts/deploy.sh: config, the data tier (the
     // API's init container waits on it), api, web, edge, then the policies.
-    let stages: &[(&str, &[&str], &[(&str, usize)])] = &[
+    let stages: &[Stage] = &[
         (
             "deploy-config",
             &["01-quota-limits.yaml", "02-rbac.yaml", "03-secrets.yaml", "04-config-edge.yaml", "05-config-web.yaml", "06-config-api.yaml"],
