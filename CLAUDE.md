@@ -57,9 +57,9 @@ docs/              ARCHITECTURE.md, STORMCOS-NOTES.md
 - [x] validate (Rust) + scripts/validate.sh, smoke-test.sh, deploy.sh, make-secrets.sh, Makefile
 - [x] test container: short, medium, long (test/)
 - [x] docs: README diagram, ARCHITECTURE, STORMCOS-NOTES, what the test proves
-- [ ] sc-build green with `deploy/check.sh` (clippy -D warnings); commit Cargo.lock
+- [x] sc-build green with `deploy/check.sh` (clippy -D warnings); Cargo.lock committed
 - [ ] BLOCKED, owner decision: no UID assignment on stormcos — a pod with runAsNonRoot,
       no runAsUser and a config-less registry image runs as uid 0 and is refused
-      (rustkube-node image_config.rs). Options on the issue; rustkube#70 (SCC scope).
-- [ ] registry entry `stormstorefront` (kind binaries) — the master runs `component add`
+      (rustkube-node image_config.rs). Question + recommendation (A: platform UID ranges) on #1, wait-owner set; rustkube#70 (SCC scope). Filed rustkube#320 (namespace metadata.name label).
+- [ ] registry entry `stormstorefront` (kind binaries) — asked of the master (note, 2026-11-18); proof wording: test report, not namespaces/storefront (asked too)
 - [ ] image build, test run on pvetest, shipped with proof
