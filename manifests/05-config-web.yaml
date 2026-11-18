@@ -1,0 +1,26 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-config
+  namespace: storefront
+  labels:
+    app.kubernetes.io/part-of: storefront
+    app.kubernetes.io/component: web
+data:
+  # Read by every container of the web pod through `envFrom`. Where the
+  # original mounts nginx snippets and a shell script, the web server and the
+  # renderer are roles of the image and this is their configuration.
+  #
+  # The shared emptyDir the renderer writes and the server reads.
+  CONTENT_DIR: /srv/www
+  DEST: /srv/www
+  # content-sync re-renders this often (seconds).
+  SYNC_INTERVAL: "30"
+  # The web tier proxies /api/ as well, so a pod reached directly
+  # (port-forward, debugging) behaves as it does through the edge.
+  API_HOST: api
+  API_PORT: "8081"
+  # Loopback only: the exporter sidecar's view of the server's counters, as
+  # nginx's stub_status vhost on 127.0.0.1.
+  STATS_LISTEN: 127.0.0.1:8081

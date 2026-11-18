@@ -1,0 +1,26 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-config
+  namespace: storefront
+  labels:
+    app.kubernetes.io/part-of: storefront
+    app.kubernetes.io/component: api
+data:
+  # Read by every container of the api pod (and its init container) through
+  # `envFrom`. The original generates this ConfigMap from src/api/api.py; here
+  # the API is a role of the image and this is its configuration.
+  API_PORT: "8081"
+  # Bare Service names resolve in the pod's own project.
+  PGHOST: postgres
+  PGPORT: "5432"
+  REDIS_HOST: cache
+  REDIS_PORT: "6379"
+  CACHE_TTL_SECONDS: "30"
+  # Written by the API, tailed to stdout by the access-log sidecar.
+  ACCESS_LOG: /var/log/api/access.log
+  # cache-warmer's period (seconds).
+  WARM_INTERVAL: "20"
+  # wait-for-deps gives up after this long (seconds).
+  DEP_TIMEOUT: "180"

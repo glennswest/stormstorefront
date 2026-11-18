@@ -1,0 +1,174 @@
+---
+# Start from zero: nothing in the project accepts traffic unless a policy
+# below names it. Egress stays open by default except for the data tier.
+#
+# "The monitoring stack" is a namespace labelled
+# `storm.io/policy-group: monitoring` (the stormcos spelling of OpenShift's
+# `network.openshift.io/policy-group: monitoring`). The node's own ironprom
+# scrapes from the host network, which Cilium admits to local pods as
+# host traffic; the label is for a scraper running as a pod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: storefront
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+---
+# The edge is the only tier reachable from outside the project.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: edge-allow-ingress
+  namespace: storefront
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: edge
+      app.kubernetes.io/part-of: storefront
+  policyTypes: ["Ingress"]
+  ingress:
+    # No `from`: traffic may arrive from stormlb's router (the host), from the
+    # LoadBalancer address, or from another project -- all of which look
+    # different on the wire.
+    - ports:
+        - { protocol: TCP, port: 8080 }
+    # Stats/metrics only from the monitoring stack.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              storm.io/policy-group: monitoring
+      ports:
+        - { protocol: TCP, port: 8404 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: web-allow-from-edge
+  namespace: storefront
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: web
+      app.kubernetes.io/part-of: storefront
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: edge
+              app.kubernetes.io/part-of: storefront
+      ports:
+        - { protocol: TCP, port: 8080 }
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              storm.io/policy-group: monitoring
+      ports:
+        - { protocol: TCP, port: 9113 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-allow-from-edge-and-web
+  namespace: storefront
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: api
+      app.kubernetes.io/part-of: storefront
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: edge
+              app.kubernetes.io/part-of: storefront
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: web
+              app.kubernetes.io/part-of: storefront
+        - namespaceSelector:
+            matchLabels:
+              storm.io/policy-group: monitoring
+      ports:
+        - { protocol: TCP, port: 8081 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-allow-from-api
+  namespace: storefront
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+      app.kubernetes.io/part-of: storefront
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: api
+              app.kubernetes.io/part-of: storefront
+      ports:
+        - { protocol: TCP, port: 5432 }
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              storm.io/policy-group: monitoring
+      ports:
+        - { protocol: TCP, port: 9187 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cache-allow-from-api
+  namespace: storefront
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cache
+      app.kubernetes.io/part-of: storefront
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: api
+              app.kubernetes.io/part-of: storefront
+      ports:
+        - { protocol: TCP, port: 6379 }
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              storm.io/policy-group: monitoring
+      ports:
+        - { protocol: TCP, port: 9121 }
+---
+# The data tier has no business calling out. Once an egress policy selects a
+# pod, everything not listed is dropped -- including DNS, hence the rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: data-egress-dns-only
+  namespace: storefront
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: ["database", "cache"]
+  policyTypes: ["Egress"]
+  egress:
+    # stormcos runs the cluster DNS (stormcoredns) in kube-system.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    # Loopback between containers in the same pod is not policed, so the
+    # exporters and the backup sidecar keep working with nothing listed here.

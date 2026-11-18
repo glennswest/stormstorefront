@@ -1,0 +1,250 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-config
+  namespace: storefront
+  labels:
+    app.kubernetes.io/part-of: storefront
+    app.kubernetes.io/component: database
+data:
+  # Applied once, on an empty volume, as the original's seed.sql runs from
+  # /docker-entrypoint-initdb.d. The same four products.
+  seed.json: |
+    {
+      "products": [
+        {"sku": "ANV-001", "name": "Anvil, 50kg",        "price_cents": 12900, "stock": 7},
+        {"sku": "RKT-014", "name": "Rocket skates",      "price_cents": 24950, "stock": 2},
+        {"sku": "SED-002", "name": "Birdseed, 10kg",     "price_cents": 1899,  "stock": 140},
+        {"sku": "TNT-100", "name": "Detonator, plunger", "price_cents": 8400,  "stock": 19}
+      ]
+    }
+---
+# Backups live on their own claim so the database volume can be resized or
+# restored without taking the dumps with it. stormblock-csi (the default
+# StorageClass, `stormblock`) provisions it.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-backups
+  namespace: storefront
+  labels:
+    app.kubernetes.io/part-of: storefront
+    app.kubernetes.io/component: database
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+# Headless service: required by the StatefulSet, and gives every replica a
+# stable DNS name (postgres-0.postgres-headless.storefront.svc.cluster.local).
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-headless
+  namespace: storefront
+  labels:
+    app.kubernetes.io/part-of: storefront
+    app.kubernetes.io/component: database
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: storefront
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: storefront
+  labels:
+    app.kubernetes.io/part-of: storefront
+    app.kubernetes.io/component: database
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: storefront
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+    - name: metrics
+      port: 9187
+      targetPort: metrics
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: storefront
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: storefront
+    app.kubernetes.io/managed-by: sc
+spec:
+  serviceName: postgres-headless
+  replicas: 1
+  # OnDelete would be safer for a real database; RollingUpdate keeps the
+  # example simple and is fine for a single replica with no followers.
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+      app.kubernetes.io/part-of: storefront
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+        app.kubernetes.io/component: database
+        app.kubernetes.io/part-of: storefront
+    spec:
+      serviceAccountName: data
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+        # No runAsUser / fsGroup: the platform assigns both, as OpenShift's
+        # restricted-v2 SCC does from the namespace's range. Hard-coding them
+        # is the most common reason a chart fails to admit on OpenShift.
+      containers:
+        # ---- 1/3: the database ------------------------------------------
+        # The store: the catalog and the orders on the `data` PVC, behind the
+        # HTTP/JSON API the API container uses (src/store.rs).
+        - name: store
+          image: stormstorefront
+          imagePullPolicy: IfNotPresent
+          # A registry image carries no entrypoint: the command is required.
+          command: ["/bin/stormstorefront", "store"]
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          env:
+            - name: STORE_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: storefront-db, key: database-password }
+            - name: STORE_DATA
+              value: /var/lib/store/data
+            - name: STORE_SEED
+              value: /etc/store/seed.json
+            - name: STORE_LISTEN
+              value: ":5432"
+            # Loopback only, for the exporter.
+            - name: STATS_LISTEN
+              value: 127.0.0.1:5433
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/store
+            - name: seed
+              mountPath: /etc/store
+              readOnly: true
+          startupProbe:
+            httpGet: { path: /healthz, port: postgres }
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /readyz, port: postgres }
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: postgres }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+          resources:
+            requests: { cpu: 20m, memory: 32Mi }
+            limits:   { cpu: 500m, memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            # The data lives on the PVC; nothing else is written.
+            readOnlyRootFilesystem: true
+        # ---- 2/3: metrics -----------------------------------------------
+        - name: exporter
+          image: stormstorefront
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/stormstorefront
+            - exporter
+            - --scrape=http://127.0.0.1:5433/stats
+            - --listen=:9187
+            - --prefix=storefront_store
+          ports:
+            - name: metrics
+              containerPort: 9187
+              protocol: TCP
+          env:
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+          readinessProbe:
+            httpGet: { path: /health, port: metrics }
+            initialDelaySeconds: 2
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits:   { cpu: 100m, memory: 32Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+        # ---- 3/3: logical backups ---------------------------------------
+        - name: backup
+          image: stormstorefront
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/stormstorefront", "backup"]
+          env:
+            - name: STORE_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: storefront-db, key: database-password }
+            - name: PGPORT
+              value: "5432"
+            - name: BACKUP_DIR
+              value: /backups
+            - name: BACKUP_INTERVAL
+              value: "3600"
+            - name: BACKUP_KEEP
+              value: "6"
+            - name: BACKUP_DELAY
+              value: "30"
+          volumeMounts:
+            - name: backups
+              mountPath: /backups
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits:   { cpu: 200m, memory: 64Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: seed
+          configMap:
+            name: postgres-config
+            items:
+              - key: seed.json
+                path: seed.json
+            defaultMode: 0444
+        - name: backups
+          persistentVolumeClaim:
+            claimName: postgres-backups
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/part-of: storefront
+          app.kubernetes.io/component: database
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

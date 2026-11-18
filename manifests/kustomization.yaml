@@ -1,0 +1,36 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# `sc apply -k manifests/` applies the whole project. Every file is listed;
+# `stormstorefront validate` fails if one is not.
+namespace: storefront
+
+resources:
+  - 00-namespace.yaml
+  - 01-quota-limits.yaml
+  - 02-rbac.yaml
+  - 03-secrets.yaml
+  - 04-config-edge.yaml
+  - 05-config-web.yaml
+  - 06-config-api.yaml
+  - 10-data-postgres.yaml
+  - 11-data-cache.yaml
+  - 20-api.yaml
+  - 30-web.yaml
+  - 40-edge.yaml
+  - 50-networkpolicy.yaml
+  - 60-autoscale-pdb.yaml
+  - 70-monitoring.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: storefront
+    # Selectors on Deployments and StatefulSets are immutable; never let
+    # kustomize edit them after the first apply.
+    includeSelectors: false
+
+# Every container says `image: stormstorefront`: the node runs the release's
+# image of that name. To run another build, pin its tag here, e.g.
+#   images:
+#     - name: stormstorefront
+#       newTag: <build id>     # registry/stormstorefront:<build id>, fetched from forge

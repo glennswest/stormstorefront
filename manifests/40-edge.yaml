@@ -1,0 +1,235 @@
+---
+# The load balancer in front of everything.
+#
+# Two ways in, both pointing at the same pods:
+#   * Service type=LoadBalancer -- an address from the site's pool
+#     (install-config networking.loadBalancerPool), which Cilium's LB-IPAM
+#     assigns and answers ARP for on the node (stormcos#215). This is the
+#     "loadbalancer in front" in the literal sense.
+#   * HTTPRoute -- stormcos's Route: stormlb's router on the node's :80
+#     demuxes on the Host header and forwards to the Service. Use it where
+#     the machine has no LoadBalancer pool and edge-lb sits in <pending>.
+apiVersion: v1
+kind: Service
+metadata:
+  name: edge-lb
+  namespace: storefront
+  labels:
+    app.kubernetes.io/part-of: storefront
+    app.kubernetes.io/component: edge
+spec:
+  type: LoadBalancer
+  # Preserves the client source IP and skips the extra node-to-node hop; the
+  # address is then answered only by nodes that run an edge pod.
+  externalTrafficPolicy: Local
+  selector:
+    app.kubernetes.io/name: edge
+    app.kubernetes.io/part-of: storefront
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+---
+# Stats and Prometheus, reachable in-cluster only -- deliberately not a port
+# on the LoadBalancer service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: edge-metrics
+  namespace: storefront
+  labels:
+    app.kubernetes.io/part-of: storefront
+    app.kubernetes.io/component: edge
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: edge
+    app.kubernetes.io/part-of: storefront
+  ports:
+    - name: metrics
+      port: 8404
+      targetPort: metrics
+---
+# stormcos's Route. The original's `route.openshift.io/v1` Route becomes a
+# Gateway API HTTPRoute, which stormlb's router serves on every node's :80
+# (stormcos deploy/manifests/85-routes.yaml): an exact hostname, the first
+# rule's first backendRef, resolved to the Service's clusterIP. TLS is not
+# terminated here (the original's `termination: edge`); see
+# docs/STORMCOS-NOTES.md.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: storefront
+  namespace: storefront
+  labels:
+    app.kubernetes.io/part-of: storefront
+    app.kubernetes.io/component: edge
+spec:
+  hostnames:
+    - storefront.storm1.g8.lo
+  rules:
+    - backendRefs:
+        - kind: Service
+          name: edge-lb
+          port: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edge
+  namespace: storefront
+  labels:
+    app.kubernetes.io/name: edge
+    app.kubernetes.io/component: edge
+    app.kubernetes.io/part-of: storefront
+    app.kubernetes.io/managed-by: sc
+  annotations:
+    app.openshift.io/connects-to: >-
+      [{"apiVersion":"apps/v1","kind":"Deployment","name":"web"},
+       {"apiVersion":"apps/v1","kind":"Deployment","name":"api"}]
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: edge
+      app.kubernetes.io/part-of: storefront
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: edge
+        app.kubernetes.io/component: edge
+        app.kubernetes.io/part-of: storefront
+    spec:
+      serviceAccountName: edge
+      terminationGracePeriodSeconds: 60
+      # Lets the reloader sidecar signal the edge process (SIGHUP). Without it
+      # the two containers are in separate PID namespaces and the signal finds
+      # nothing -- the edge then picks the new file up by watching it. Note
+      # the side effect: every container in the pod can see (and signal)
+      # every other container's processes.
+      shareProcessNamespace: true
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      # Two edge replicas on one node are a single point of failure for the
+      # whole ingress path, so spread them. Preferred rather than the
+      # original's required: a single-node stormcos (every test machine) must
+      # still run both, where required would leave one Pending forever.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: edge
+                    app.kubernetes.io/part-of: storefront
+      initContainers:
+        # Validate before anything binds a port: a bad ConfigMap stops the
+        # rollout here, not the running replicas.
+        - name: validate-config
+          image: stormstorefront
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/stormstorefront", "validate-config"]
+          env:
+            - name: EDGE_SOURCE
+              value: /etc/edge/src/edge.toml
+            - name: EDGE_CONFIG
+              value: /etc/edge/live/edge.toml
+          volumeMounts:
+            - { name: config, mountPath: /etc/edge/src, readOnly: true }
+            - { name: live,   mountPath: /etc/edge/live }
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits:   { cpu: 100m, memory: 32Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+      containers:
+        # ---- 1/2: the edge, reloading seamlessly ------------------------
+        - name: edge
+          image: stormstorefront
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/stormstorefront", "edge"]
+          ports:
+            - { name: http,    containerPort: 8080, protocol: TCP }
+            - { name: metrics, containerPort: 8404, protocol: TCP }
+          env:
+            - name: EDGE_CONFIG
+              value: /etc/edge/live/edge.toml
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+          volumeMounts:
+            - { name: live, mountPath: /etc/edge/live, readOnly: true }
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 2
+            failureThreshold: 15
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 15
+            timeoutSeconds: 2
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              # Drain: stop being Ready, let the LB and the router notice, and
+              # only then let SIGTERM finish it.
+              exec:
+                command: ["/bin/stormstorefront", "sleep", "10"]
+          resources:
+            requests: { cpu: 20m, memory: 16Mi }
+            limits:   { cpu: "1", memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+        # ---- 2/2: watch the ConfigMap, validate, reload -------------------
+        - name: config-reloader
+          image: stormstorefront
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/stormstorefront", "config-reloader"]
+          env:
+            - name: EDGE_SOURCE
+              value: /etc/edge/src/edge.toml
+            - name: EDGE_CONFIG
+              value: /etc/edge/live/edge.toml
+            - name: RELOAD_INTERVAL
+              value: "10"
+          volumeMounts:
+            - { name: config, mountPath: /etc/edge/src, readOnly: true }
+            - { name: live,   mountPath: /etc/edge/live }
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits:   { cpu: 100m, memory: 32Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+      volumes:
+        # The ConfigMap, read-only. No subPath anywhere: a subPath mount never
+        # sees the kubelet's update.
+        - name: config
+          configMap:
+            name: edge-config
+            defaultMode: 0444
+        # The writable copy the edge actually reads; staged by the init
+        # container and replaced by the reloader.
+        - name: live
+          emptyDir:
+            sizeLimit: 4Mi

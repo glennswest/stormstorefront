@@ -1,0 +1,108 @@
+---
+# Horizontal scaling for the two stateless tiers. The HPA ceilings stay under
+# the 12 slots of the edge's backends, so scaling out never needs an edge
+# reload.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: web
+  namespace: storefront
+  labels:
+    app.kubernetes.io/part-of: storefront
+    app.kubernetes.io/component: web
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: web
+  minReplicas: 3
+  maxReplicas: 9
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }
+    - type: Resource
+      resource:
+        name: memory
+        target: { type: Utilization, averageUtilization: 80 }
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - { type: Percent, value: 100, periodSeconds: 30 }
+    scaleDown:
+      # Slow on the way down: a five-minute window stops the autoscaler
+      # oscillating against a bursty front end.
+      stabilizationWindowSeconds: 300
+      policies:
+        - { type: Pods, value: 1, periodSeconds: 60 }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api
+  namespace: storefront
+  labels:
+    app.kubernetes.io/part-of: storefront
+    app.kubernetes.io/component: api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api
+  minReplicas: 3
+  maxReplicas: 9
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - { type: Pods, value: 2, periodSeconds: 30 }
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - { type: Pods, value: 1, periodSeconds: 60 }
+---
+# Disruption budgets bound what a drain or an update may take out at once.
+# The data tier has none: with a single replica, any PDB would either be
+# useless or would block drains outright.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: edge
+  namespace: storefront
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: edge
+      app.kubernetes.io/part-of: storefront
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web
+  namespace: storefront
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: web
+      app.kubernetes.io/part-of: storefront
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api
+  namespace: storefront
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api
+      app.kubernetes.io/part-of: storefront

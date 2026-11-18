@@ -1,0 +1,19 @@
+---
+# The whole example lives in one project. On stormcos a project is a
+# namespace (stormcos#1020, the OpenShift model): `sc get project storefront`
+# shows it, and `sc new-project` would set the same annotations.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: storefront
+  labels:
+    app.kubernetes.io/part-of: storefront
+    # Pod Security Admission: rustkube's PodSecurity admission enforces the
+    # restricted level on this namespace, as OpenShift's restricted-v2 SCC
+    # and the upstream labels do together there.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+  annotations:
+    openshift.io/display-name: "Storefront demo"
+    openshift.io/description: "Three-tier demo on stormcos: Rust edge -> web -> API -> store/cache"

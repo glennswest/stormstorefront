@@ -1,0 +1,124 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cache
+  namespace: storefront
+  labels:
+    app.kubernetes.io/part-of: storefront
+    app.kubernetes.io/component: cache
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: cache
+    app.kubernetes.io/part-of: storefront
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+    - name: metrics
+      port: 9121
+      targetPort: metrics
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cache
+  namespace: storefront
+  labels:
+    app.kubernetes.io/name: cache
+    app.kubernetes.io/component: cache
+    app.kubernetes.io/part-of: storefront
+    app.kubernetes.io/managed-by: sc
+spec:
+  replicas: 1
+  # A cache with one replica and no persistence: replace it rather than run
+  # two copies with divergent contents.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cache
+      app.kubernetes.io/part-of: storefront
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cache
+        app.kubernetes.io/component: cache
+        app.kubernetes.io/part-of: storefront
+    spec:
+      serviceAccountName: data
+      terminationGracePeriodSeconds: 20
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        # ---- 1/2: the cache ---------------------------------------------
+        # A RESP key-value server (src/cache.rs) in place of Redis 7:
+        # password-protected, deliberately non-persistent.
+        - name: cache
+          image: stormstorefront
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/stormstorefront", "cache"]
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: TCP
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: storefront-cache, key: redis-password }
+            - name: CACHE_LISTEN
+              value: ":6379"
+            # Loopback only, for the exporter.
+            - name: STATS_LISTEN
+              value: 127.0.0.1:6380
+          startupProbe:
+            tcpSocket: { port: redis }
+            periodSeconds: 2
+            failureThreshold: 20
+          readinessProbe:
+            tcpSocket: { port: redis }
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            tcpSocket: { port: redis }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits:   { cpu: 500m, memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            # In memory only; nothing is written.
+            readOnlyRootFilesystem: true
+        # ---- 2/2: metrics -----------------------------------------------
+        - name: exporter
+          image: stormstorefront
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/stormstorefront
+            - exporter
+            - --scrape=http://127.0.0.1:6380/stats
+            - --listen=:9121
+            - --prefix=storefront_cache
+          ports:
+            - name: metrics
+              containerPort: 9121
+              protocol: TCP
+          env:
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+          readinessProbe:
+            httpGet: { path: /health, port: metrics }
+            initialDelaySeconds: 2
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits:   { cpu: 100m, memory: 32Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true

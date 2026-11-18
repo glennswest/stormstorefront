@@ -1,0 +1,50 @@
+---
+# A quota makes the example honest: every container below declares requests
+# and limits, so the namespace total is predictable. The ceiling leaves room
+# for the HPAs' maximum (9 web + 9 api) and a rollout's surge pod.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: storefront-quota
+  namespace: storefront
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.cpu: "16"
+    limits.memory: 16Gi
+    requests.storage: 20Gi
+    persistentvolumeclaims: "4"
+    pods: "40"
+    services: "10"
+    services.loadbalancers: "1"
+    secrets: "20"
+    configmaps: "20"
+---
+# Defaults for anything that forgets to ask, and a ceiling so one container
+# cannot eat the namespace quota on its own.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: storefront-limits
+  namespace: storefront
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: 200m
+        memory: 128Mi
+      defaultRequest:
+        cpu: 20m
+        memory: 32Mi
+      max:
+        cpu: "2"
+        memory: 2Gi
+      min:
+        cpu: 5m
+        memory: 8Mi
+    - type: PersistentVolumeClaim
+      max:
+        storage: 10Gi
+      min:
+        storage: 1Gi

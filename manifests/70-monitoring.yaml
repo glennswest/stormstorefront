@@ -1,0 +1,84 @@
+---
+# The original's ServiceMonitors and PrometheusRule, for ironprom (stormcos's
+# Prometheus-compatible scraper). ironprom takes Prometheus's own config:
+# `scrape.yml` is a scrape_configs fragment using kubernetes_sd (no Prometheus
+# Operator CRDs needed), `rules.yml` a rule file. A plain ConfigMap, so unlike
+# the original's 70-monitoring.yaml it is applied with everything else.
+#
+# The node's ironprom reads its targets from stormcos
+# deploy/metrics/ironprom-node.yml; to scrape the storefront there, add these
+# jobs and this rule file to it (docs/STORMCOS-NOTES.md). The node's ironprom
+# runs on the host network, which Cilium admits to local pods, so the
+# NetworkPolicies need no change for it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: storefront-monitoring
+  namespace: storefront
+  labels:
+    app.kubernetes.io/part-of: storefront
+data:
+  scrape.yml: |
+    scrape_configs:
+      # Every `metrics` port: the edge (:8404), the web, store and cache
+      # exporters (:9113, :9187, :9121).
+      - job_name: storefront
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names: [storefront]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            regex: metrics
+            action: keep
+          - source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_component]
+            target_label: component
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+      # The API serves Prometheus text on its own port, under /api/metrics.
+      - job_name: storefront-api
+        metrics_path: /api/metrics
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names: [storefront]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+            regex: api;http
+            action: keep
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+  rules.yml: |
+    groups:
+      - name: storefront.rules
+        rules:
+          - alert: StorefrontEdgeNoBackends
+            expr: sum by (backend) (storefront_edge_backend_active_servers{namespace="storefront"}) == 0
+            for: 2m
+            labels: { severity: critical }
+            annotations:
+              summary: "Edge backend {{ $labels.backend }} has no active servers"
+          - alert: StorefrontApiCacheColdspell
+            expr: |
+              rate(storefront_api_cache_misses_total[5m])
+                > 4 * rate(storefront_api_cache_hits_total[5m])
+            for: 10m
+            labels: { severity: warning }
+            annotations:
+              summary: "API cache miss rate is dominating -- is the cache reachable?"
+          - alert: StorefrontWebNotReady
+            expr: count(storefront_web_content_ready{namespace="storefront"} == 1) < 2
+            for: 5m
+            labels: { severity: warning }
+            annotations:
+              summary: "Fewer than two web replicas are serving content"
+          - alert: StorefrontStoreDown
+            expr: max(storefront_store_up{namespace="storefront"}) < 1
+            for: 2m
+            labels: { severity: critical }
+            annotations:
+              summary: "The store's exporter cannot reach the store"

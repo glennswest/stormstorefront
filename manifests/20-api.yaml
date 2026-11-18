@@ -1,0 +1,210 @@
+---
+# ClusterIP for ordinary in-cluster callers (the web tier proxies to this).
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: storefront
+  labels:
+    app.kubernetes.io/part-of: storefront
+    app.kubernetes.io/component: api
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/part-of: storefront
+  ports:
+    - name: http
+      port: 8081
+      targetPort: http
+---
+# Headless: DNS returns one A record per ready pod. The edge uses this so it
+# can balance and health-check individual pods itself.
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-headless
+  namespace: storefront
+  labels:
+    app.kubernetes.io/part-of: storefront
+    app.kubernetes.io/component: api
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/part-of: storefront
+  ports:
+    - name: http
+      port: 8081
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: storefront
+  labels:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: storefront
+    app.kubernetes.io/managed-by: sc
+  annotations:
+    app.openshift.io/connects-to: >-
+      [{"apiVersion":"apps/v1","kind":"StatefulSet","name":"postgres"},
+       {"apiVersion":"apps/v1","kind":"Deployment","name":"cache"}]
+spec:
+  replicas: 3
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api
+      app.kubernetes.io/part-of: storefront
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: api
+        app.kubernetes.io/component: api
+        app.kubernetes.io/part-of: storefront
+    spec:
+      serviceAccountName: api
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      # Spread across nodes first, then zones; soft, so a single node still
+      # schedules all three replicas.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: api
+              app.kubernetes.io/part-of: storefront
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: api
+              app.kubernetes.io/part-of: storefront
+      initContainers:
+        # Blocks until the store and the cache accept TCP, so a slow data tier
+        # is a pending pod, not a CrashLoopBackOff.
+        - name: wait-for-deps
+          image: stormstorefront
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/stormstorefront", "wait-for-deps"]
+          envFrom:
+            - configMapRef: { name: api-config }
+          env:
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits:   { cpu: 100m, memory: 32Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+      containers:
+        # ---- 1/3: the API itself ----------------------------------------
+        - name: api
+          image: stormstorefront
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/stormstorefront", "api"]
+          ports:
+            - name: http
+              containerPort: 8081
+              protocol: TCP
+          envFrom:
+            - configMapRef: { name: api-config }
+          env:
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            - name: NODE_NAME
+              valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+            - name: POD_IP
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: storefront-cache, key: redis-password }
+            - name: STORE_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: storefront-db, key: database-password }
+          volumeMounts:
+            - { name: logs, mountPath: /var/log/api }
+          startupProbe:
+            httpGet: { path: /api/healthz, port: http }
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            # /api/readyz reports 503 while the store or the cache is
+            # unreachable, which pulls the pod out of both Services and out of
+            # the edge's pool.
+            httpGet: { path: /api/readyz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /api/healthz, port: http }
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              # Give endpoint removal time to reach the Service and the edge
+              # before the process goes away. No shell in the image: the
+              # binary's own `sleep`.
+              exec:
+                command: ["/bin/stormstorefront", "sleep", "8"]
+          resources:
+            requests: { cpu: 20m, memory: 16Mi }
+            limits:   { cpu: 500m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+        # ---- 2/3: ship the file-based access log to stdout ---------------
+        - name: access-log
+          image: stormstorefront
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/stormstorefront", "access-log"]
+          envFrom:
+            - configMapRef: { name: api-config }
+          volumeMounts:
+            - { name: logs, mountPath: /var/log/api }
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits:   { cpu: 50m, memory: 32Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+        # ---- 3/3: keep this pod's catalog entry warm in the cache ----------
+        - name: cache-warmer
+          image: stormstorefront
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/stormstorefront", "cache-warmer"]
+          envFrom:
+            - configMapRef: { name: api-config }
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits:   { cpu: 50m, memory: 32Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+      volumes:
+        # Shared between the API (writer) and access-log (reader).
+        - name: logs
+          emptyDir:
+            sizeLimit: 64Mi

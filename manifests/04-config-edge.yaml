@@ -1,0 +1,68 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: edge-config
+  namespace: storefront
+  labels:
+    app.kubernetes.io/part-of: storefront
+    app.kubernetes.io/component: edge
+data:
+  # The edge's config, in place of the original's haproxy.cfg.
+  #
+  # Two things keep it restricted-safe, as the original's comments say of
+  # HAProxy: there is no user/group to switch to (the container runs as the
+  # UID the platform gives it), and every bind is above 1024, because the
+  # process holds no capabilities.
+  #
+  # Backends name the *headless* Services, so the edge balances across pod
+  # IPs itself instead of handing everything to one ClusterIP. Bare names
+  # resolve in the pod's own project (`web-headless.<ns>.svc.cluster.local`),
+  # so the same file serves `storefront` and the test's project.
+  #
+  # `stormstorefront validate` and the validate-config init container check
+  # this file as `haproxy -c` checks the original's.
+  edge.toml: |
+    listen = ":8080"
+    # Stats + Prometheus on a port that is deliberately NOT on the
+    # LoadBalancer Service.
+    metrics_listen = ":8404"
+    # The edge's own liveness, answered without touching a backend.
+    health_path = "/healthz"
+    default_backend = "web"
+    # A connection refused is retried on another server, as HAProxy's
+    # `retries 3` + `retry-on all-retryable-errors`.
+    retries = 3
+    timeout_ms = 30000
+    # How often the headless Services are re-resolved (`hold valid 5s`).
+    resolve_interval_ms = 5000
+
+    [[route]]
+    prefix = "/api/"
+    backend = "api"
+
+    [backend.web]
+    service = "web-headless"
+    port = 8080
+    balance = "roundrobin"
+    check = "/healthz"
+    check_host = "web"
+    # Insert-cookie affinity, as `cookie SRVID insert indirect nocache`.
+    cookie = "SRVID"
+    # 12 slots: more than the web HPA's ceiling, so scale-up needs no reload.
+    slots = 12
+    inter_ms = 2000
+    rise = 2
+    fall = 3
+
+    [backend.api]
+    service = "api-headless"
+    port = 8081
+    # The API is stateless: no affinity, least connections.
+    balance = "leastconn"
+    check = "/api/readyz"
+    check_host = "api"
+    slots = 12
+    inter_ms = 2000
+    rise = 2
+    fall = 3

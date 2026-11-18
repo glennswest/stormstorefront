@@ -1,0 +1,68 @@
+---
+# One ServiceAccount per tier. None of them is bound to anything privileged:
+# every pod here runs restricted.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: edge
+  namespace: storefront
+  labels:
+    app.kubernetes.io/part-of: storefront
+    app.kubernetes.io/component: edge
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: web
+  namespace: storefront
+  labels:
+    app.kubernetes.io/part-of: storefront
+    app.kubernetes.io/component: web
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: api
+  namespace: storefront
+  labels:
+    app.kubernetes.io/part-of: storefront
+    app.kubernetes.io/component: api
+# The API reads its own ConfigMaps/Endpoints, so it keeps its token.
+automountServiceAccountToken: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: data
+  namespace: storefront
+  labels:
+    app.kubernetes.io/part-of: storefront
+    app.kubernetes.io/component: data
+automountServiceAccountToken: false
+---
+# Deliberately narrow: read-only, namespace-scoped, no secrets.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: api-reader
+  namespace: storefront
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "endpoints", "pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: api-reader
+  namespace: storefront
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: api-reader
+subjects:
+  - kind: ServiceAccount
+    name: api
+    namespace: storefront
