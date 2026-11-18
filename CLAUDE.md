@@ -61,10 +61,12 @@ docs/              ARCHITECTURE.md, CONFIGURATION.md, STORMCOS-NOTES.md, researc
 - [x] UID decision (master, 2026-11-18): A — the platform assigns UIDs as restricted-v2
       (rustkube#321, P0). The app pins nothing; the test names rustkube#321 as the gap
       when pods are refused as root, and passes as written once a release carries it.
-- [ ] stormlb as the edge (master, 2026-11-18; stormlb#37): LoadBalancer address from stormlb,
+- [x] stormlb as the edge (master, 2026-11-18; stormlb#37; 4a3d07d, sc-build deploy/check.sh green): LoadBalancer address from stormlb,
       HTTPRoute as the backend config (`/` → web, `/api/` → api, weights, readiness as health),
       test proves spread over both edge pods and every web/api pod (LB address and route),
       a web pod killed with no failed request on either, the route's pool following 3→6→3,
       the route's status read back; where stormlb is not there the test names stormlb#37.
+- [ ] BLOCKED (item proposed --after rustkube#321): the medium test cannot pass on a node until a
+      release carries rustkube#321 (UID) and stormlb#37 (address, route rules); it reports them as gaps.
 - [ ] registry entry `stormstorefront` (kind binaries) — asked of the master (note, 2026-11-18); proof wording: test report, not namespaces/storefront (asked too)
 - [ ] image build, test run on pvetest, shipped with proof
