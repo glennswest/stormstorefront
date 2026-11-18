@@ -89,8 +89,9 @@ cache call is wrapped, a failure counts in
 
 ## The request path, end to end
 
-1. The LoadBalancer address (Cilium) or stormlb's router (HTTPRoute) reaches
-   an edge pod on :8080.
+1. The LoadBalancer address (stormlb) reaches an edge pod on :8080. (The
+   HTTPRoute host, stormlb's router, goes straight to web and api by the
+   route's own rules — the same split as the edge's; docs/STORMCOS-NOTES.md §3.)
 2. The edge stamps `X-Request-Id`, answers `/healthz` itself, picks a backend
    by path.
 3. `web` is round-robin with an insert cookie (`SRVID`) for affinity; `api`

@@ -1,14 +1,16 @@
----
-# The load balancer in front of everything.
+# The load balancer in front of everything. stormlb is the edge on stormcos
+# (stormlb#37): several frontends, each with its own backend pool.
 #
-# Two ways in, both pointing at the same pods:
-#   * Service type=LoadBalancer -- an address from the site's pool
-#     (install-config networking.loadBalancerPool), which Cilium's LB-IPAM
-#     assigns and answers ARP for on the node (stormcos#215). This is the
-#     "loadbalancer in front" in the literal sense.
+# Two ways in:
+#   * Service type=LoadBalancer -- an address from the node's lb_pool that
+#     stormlb allocates (status.loadBalancer.ingress), its pool the edge
+#     pods' endpoints, followed live. Both edge pods take traffic; the edge
+#     then routes `/api/` to api and the rest to web, per pod.
 #   * HTTPRoute -- stormcos's Route: stormlb's router on the node's :80
-#     demuxes on the Host header and forwards to the Service. Use it where
-#     the machine has no LoadBalancer pool and edge-lb sits in <pending>.
+#     matches the Host header, and the route's rules are its backend config:
+#     `/` -> web, `/api/` -> api, weighted, each backend's health from its
+#     pods' readiness. Use it where the machine has no LoadBalancer pool and
+#     edge-lb sits in <pending>.
 apiVersion: v1
 kind: Service
 metadata:
@@ -51,10 +53,16 @@ spec:
       port: 8404
       targetPort: metrics
 ---
-# stormcos's Route. The original's `route.openshift.io/v1` Route becomes a
-# Gateway API HTTPRoute, which stormlb's router serves on every node's :80
-# (stormcos deploy/manifests/85-routes.yaml): an exact hostname, the first
-# rule's first backendRef, resolved to the Service's clusterIP. TLS is not
+# stormcos's Route, and stormlb's backend config. The original's
+# `route.openshift.io/v1` Route becomes a Gateway API HTTPRoute that
+# stormlb's router serves on every node's :80 (stormcos
+# deploy/manifests/85-routes.yaml). Its rules are the backend config
+# (stormlb#37): the longest matching path prefix wins, each backendRef is a
+# pool of the Service's ready endpoints (readiness is the health check), and
+# `weight` splits a rule between its refs. `/` -> web comes first: a router
+# that only reads the first rule still serves everything, since web proxies
+# `/api/` to api itself. The router runs on the host, which Cilium admits to
+# local pods, so the default-deny policies need no hole for it. TLS is not
 # terminated here (the original's `termination: edge`); see
 # docs/STORMCOS-NOTES.md.
 apiVersion: gateway.networking.k8s.io/v1
@@ -69,10 +77,24 @@ spec:
   hostnames:
     - storefront.storm1.g8.lo
   rules:
-    - backendRefs:
+    - matches:
+        - path: { type: PathPrefix, value: / }
+      backendRefs:
         - kind: Service
-          name: edge-lb
-          port: 80
+          name: web
+          port: 8080
+          weight: 100
+      timeouts:
+        request: 30s
+    - matches:
+        - path: { type: PathPrefix, value: /api/ }
+      backendRefs:
+        - kind: Service
+          name: api
+          port: 8081
+          weight: 100
+      timeouts:
+        request: 30s
 ---
 apiVersion: apps/v1
 kind: Deployment

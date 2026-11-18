@@ -19,12 +19,12 @@ behave like OpenShift.
                         │
         ┌───────────────┴────────────────┐
         │                                │
-   HTTPRoute (stormlb)          Service type=LoadBalancer
+   HTTPRoute (stormlb router)   Service type=LoadBalancer (stormlb)
    Host: storefront.storm1…     edge-lb :80  →  :8080
    on any node's :80            externalTrafficPolicy: Local
-        │                                │
-        └───────────────┬────────────────┘
-                        ▼
+   rules: / → web, /api/ → api           │
+   (straight to web/api pods)            │
+                                         ▼
         ┌────────────────────────────────────┐
         │  edge  ×2        Deployment        │   Rust L7 edge
         │  ├─ edge               :8080 :8404 │   path routing, per-pod health
@@ -121,22 +121,32 @@ runs on every test machine:
     `/api/healthz`, `/api/readyz`, `/api/products`, `/api/metrics`), the
     catalog served from the cache, requests spread over more than one api
     and web pod;
-  - the edge through Service DNS, through the **LoadBalancer address** (skip
-    on a machine with no pool), and through the **HTTPRoute host** on the
-    node's :80;
+  - the edge through Service DNS, through the **LoadBalancer address**
+    (stormlb's), and through the **HTTPRoute host** on the node's :80;
+  - **stormlb's frontends and backend config** (stormlb#37): the address's
+    requests spread over both edge pods and every web and api pod; the
+    route's `/` over every web pod and `/api/` over every api pod with no web
+    hop; the route's status `Accepted` and `ResolvedRefs`;
   - **every container's metrics** (11 endpoints, each exporter seeing its
     neighbour up);
   - `logs -c` of the sidecars, a backup written;
   - an order **surviving a `postgres` pod restart** (the PVC keeps it); the
     API **surviving a `cache` restart** (no API restart, the cache used
-    again); a **killed `web` pod replaced** with no failed request; **`web`
-    scaled 3→6→3** with the edge following each step; a **ConfigMap edit
+    again); a **killed `web` pod replaced** with no failed request through
+    the edge, the address or the route; **`web` scaled 3→6→3** with the edge
+    and the route's pool following each step; a **ConfigMap edit
     reloading the edge**;
   - then every object deleted, and **nothing left**: no pod, no claim, no
     PersistentVolume, and no engine volume (`storage.storm.io/v1`) naming a
     claim, a container or the project (stormblock#649's traceability rule).
 - **long** — medium with the disruptions in five timed waves; a wave more
   than twice as slow as the first fails it.
+
+A check that fails because a platform piece is not released yet is a
+**gap**: it fails, and its line names the issue (`"gap": "rustkube#321"`
+— UID assignment for restricted pods; `"gap": "stormlb#37"` — LoadBalancer
+addresses and the route as backend config). Once a release carries it, the
+same check passes as written.
 
 ## Layout
 
@@ -156,6 +166,8 @@ docs/         ARCHITECTURE.md (why it is shaped this way)
 - stormcos with rustkube, stormlb's router (for the HTTPRoute) and
   the built-in stormblock driver (the default StorageClass `stormblock`, for the two PVCs).
 - The `stormstorefront` image in the node's release (or its registry).
-- A LoadBalancer pool (install-config `networking.loadBalancerPool`) for
+- stormlb with a LoadBalancer pool (`lb_pool`, stormlb#37) for
   `svc/edge-lb`; without one it stays `<pending>` — use the HTTPRoute, or
   `make forward`.
+- UID assignment for restricted pods (rustkube#321): the manifests pin no
+  UID, as on OpenShift.

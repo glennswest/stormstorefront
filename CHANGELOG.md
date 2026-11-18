@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### 2026-11-18
+- **feat:** stormlb as the edge (#1, stormlb#37): the HTTPRoute is stormlb's backend config (`/` → web, `/api/` → api, weights, timeouts, readiness as health); the LoadBalancer address is stormlb's. The test adds `loadbalancer-spread` (both edge pods, every web and api pod through the address) and `httproute-backends` (every web and api pod through the route, no web hop on `/api/`, route status `Accepted`/`ResolvedRefs`); `pod-replaced` kills a web pod under traffic on the edge, the address and the route; `scale-web` checks the route's pool follows 3→6→3.
+- **feat:** test gaps: a failure caused by an unreleased platform piece names it (`"gap": "rustkube#321"` when pods are refused as root, `"gap": "stormlb#37"` for the address and the route); the LoadBalancer check fails as a gap instead of skipping.
+- **docs:** the UID decision (option A, rustkube#321) and stormlb's role in README, ARCHITECTURE, STORMCOS-NOTES.
 - **docs:** docs/CONFIGURATION.md (env keys and defaults, ports, edge.toml, api and store endpoints) from the code; storage described as the built-in stormblock driver, not stormblock-csi (README, ARCHITECTURE, STORMCOS-NOTES, manifest comment); layout lists updated.
 - **feat:** `stormstorefront`, one static Rust binary with every container's
   role (#1): `edge` (L7 path routing, per-pod balancing over headless DNS,

@@ -8,13 +8,22 @@
 //!   (`extra_namespaces = ["storefront"]`) exactly as `sc apply -k manifests/`
 //!   makes it, every pod n/n ready, the report of every pod with its
 //!   containers, every path through the edge (ClusterIP, Service DNS,
-//!   LoadBalancer address, HTTPRoute), every container's metrics, `logs -c`,
+//!   LoadBalancer address, HTTPRoute), requests spread over both edge pods
+//!   and every web and api pod from the LoadBalancer address and from the
+//!   route's backend config, the route's status, every container's metrics, `logs -c`,
 //!   the backup sidecar, an order surviving a `postgres` pod restart, the API
 //!   surviving a `cache` restart, a killed pod replaced, `web` scaled
 //!   3→6→3 with the edge following, a ConfigMap edit reloading the edge; then
 //!   the project's objects deleted and nothing left (no PV, no engine volume
 //!   or container clone naming them).
 //! - `long`: `medium` with the disruptions repeated in waves, each wave timed.
+//!
+//! A failure caused by a platform piece that is not there yet is a *gap*: it
+//! fails like any other, and its detail and JSON line name the issue that
+//! closes it (`"gap": "rustkube#321"` — no UID assignment for restricted
+//! pods; `"gap": "stormlb#37"` — LoadBalancer addresses, multiple frontends,
+//! the HTTPRoute as backend config). Once a release carries the fix, the same
+//! test passes as written.
 
 mod kube;
 mod manifests;
@@ -32,6 +41,25 @@ use storefront::http;
 enum Bad {
     Fail(String),
     Skip(String),
+    /// A failure whose cause is a platform issue not yet released.
+    Gap(&'static str, String),
+}
+
+/// The platform issues the test names as gaps.
+const GAP_UID: &str = "rustkube#321";
+const GAP_LB: &str = "stormlb#37";
+
+fn gap<T>(issue: &'static str, msg: impl Into<String>) -> Result<T, Bad> {
+    Err(Bad::Gap(issue, msg.into()))
+}
+
+/// A pod refused because nothing gave it a non-root UID is rustkube#321's
+/// gap, not the storefront's failure (the manifests pin no UID, by design).
+fn uid_gap(e: Bad) -> Bad {
+    match e {
+        Bad::Fail(m) if m.contains("runAsNonRoot") || m.contains("would run as root") => Bad::Gap(GAP_UID, m),
+        other => other,
+    }
 }
 
 type Step = Result<String, Bad>;
@@ -50,12 +78,19 @@ struct Tally {
 
 impl Tally {
     fn record(&mut self, test: &str, status: &str, ms: u128, detail: &str) {
+        self.record_gap(test, status, ms, detail, None)
+    }
+
+    fn record_gap(&mut self, test: &str, status: &str, ms: u128, detail: &str, gap: Option<&str>) {
         match status {
             "pass" => self.pass += 1,
             "fail" => self.fail += 1,
             _ => self.skip += 1,
         }
-        let line = json!({"test": test, "status": status, "ms": ms as u64, "detail": detail});
+        let mut line = json!({"test": test, "status": status, "ms": ms as u64, "detail": detail});
+        if let Some(g) = gap {
+            line["gap"] = json!(g);
+        }
         println!("{line}");
         let _ = std::io::stdout().flush();
         self.lines.push(line);
@@ -77,6 +112,10 @@ impl Tally {
             }
             Err(Bad::Skip(detail)) => {
                 self.record(test, "skip", ms, &detail);
+                false
+            }
+            Err(Bad::Gap(issue, detail)) => {
+                self.record_gap(test, "fail", ms, &format!("gap {issue}: {detail}"), Some(issue));
                 false
             }
         }
@@ -161,7 +200,67 @@ struct Ctx {
     container_ids: BTreeSet<String>,
     pv_names: BTreeSet<String>,
     edge_ip: Option<String>,
+    lb_ip: Option<String>,
     order_id: Option<u64>,
+}
+
+/// One way in: the edge's ClusterIP, the LoadBalancer address, or the route
+/// (a node's :80 with the route's Host).
+#[derive(Clone)]
+struct Front {
+    label: &'static str,
+    base: String,
+    host: Option<String>,
+}
+
+impl Front {
+    fn get(&self, path: &str) -> Result<http::Response, String> {
+        let headers: Vec<(&str, &str)> = self.host.as_deref().map(|h| vec![("Host", h)]).unwrap_or_default();
+        http::call("GET", &format!("{}{path}", self.base), &headers, b"", Duration::from_secs(10)).map_err(|e| e.to_string())
+    }
+
+    /// GETs `path` until `header` has named `want` distinct pods, or `max`
+    /// requests. Returns the count per pod, the failed requests and how many
+    /// answers carried `absent` (a header that must not be there).
+    fn spread(&self, path: &str, header: &str, want: usize, max: usize, absent: Option<&str>) -> Spread {
+        let mut sp = Spread::default();
+        for _ in 0..max {
+            match self.get(path) {
+                Ok(r) if r.status == 200 => {
+                    if let Some(p) = r.header(header) {
+                        *sp.pods.entry(p.to_string()).or_default() += 1;
+                    }
+                    if absent.is_some_and(|a| r.header(a).is_some()) {
+                        sp.via_absent += 1;
+                    }
+                }
+                Ok(r) => sp.failed.push(format!("{} {}", r.status, r.body_str().chars().take(120).collect::<String>())),
+                Err(e) => sp.failed.push(e),
+            }
+            if sp.pods.len() >= want {
+                break;
+            }
+        }
+        sp
+    }
+}
+
+#[derive(Default)]
+struct Spread {
+    pods: std::collections::BTreeMap<String, u32>,
+    failed: Vec<String>,
+    via_absent: u32,
+}
+
+impl Spread {
+    fn show(&self) -> String {
+        let pods: Vec<String> = self.pods.iter().map(|(p, n)| format!("{p}={n}")).collect();
+        let mut s = format!("[{}]", pods.join(" "));
+        if !self.failed.is_empty() {
+            s.push_str(&format!(", {} failed (first: {})", self.failed.len(), self.failed[0]));
+        }
+        s
+    }
 }
 
 fn pod_ready(p: &Value) -> bool {
@@ -349,6 +448,31 @@ impl Ctx {
         }
     }
 
+    /// The LoadBalancer address, waiting up to `wait` for stormlb to give one.
+    fn lb_front(&mut self, wait: Duration) -> Option<Front> {
+        let t0 = Instant::now();
+        while self.lb_ip.is_none() {
+            if let Ok((200, v)) = self.k.get(&format!("/api/v1/namespaces/{}/services/edge-lb", self.ns)) {
+                let ing = &v["status"]["loadBalancer"]["ingress"][0];
+                if let Some(ip) = ing["ip"].as_str().or(ing["hostname"].as_str()) {
+                    self.lb_ip = Some(ip.to_string());
+                    break;
+                }
+            }
+            if t0.elapsed() >= wait {
+                return None;
+            }
+            std::thread::sleep(Duration::from_secs(3));
+        }
+        self.lb_ip.as_ref().map(|ip| Front { label: "loadbalancer", base: format!("http://{ip}"), host: None })
+    }
+
+    /// The route: the run's Host on the node's :80 (stormlb's router).
+    fn route_front(&self) -> Option<Front> {
+        let node = self.node.as_ref()?;
+        Some(Front { label: "httproute", base: format!("http://{node}:80"), host: Some(self.overlay.hostname.clone()) })
+    }
+
     /// Every edge pod reports `n` active servers for `backend`.
     fn edges_see(&self, backend: &str, n: usize, timeout: Duration) -> Step {
         let t = Instant::now();
@@ -401,7 +525,7 @@ fn deploy(t: &mut Tally, c: &mut Ctx) -> bool {
             }
             let mut ready = Vec::new();
             for (app, n) in *waits {
-                ready.push(c.wait_ready(app, *n, READY_TIMEOUT)?);
+                ready.push(c.wait_ready(app, *n, READY_TIMEOUT).map_err(uid_gap)?);
             }
             Ok(format!("created {}; {}", made.join(" "), ready.join("; ")))
         });
@@ -528,25 +652,33 @@ fn checks(t: &mut Tally, c: &mut Ctx) {
     });
 
     t.run("loadbalancer", || {
-        let t0 = Instant::now();
-        let ip = loop {
-            if let Ok((200, v)) = c.k.get(&format!("/api/v1/namespaces/{}/services/edge-lb", c.ns)) {
-                let ing = &v["status"]["loadBalancer"]["ingress"][0];
-                if let Some(ip) = ing["ip"].as_str().or(ing["hostname"].as_str()) {
-                    break ip.to_string();
-                }
-            }
-            if t0.elapsed() > Duration::from_secs(60) {
-                return Err(Bad::Skip("edge-lb has no LoadBalancer address after 60s (no pool on this machine: stormcos#215)".into()));
-            }
-            std::thread::sleep(Duration::from_secs(3));
+        // stormlb allocates the address from the node's lb_pool (stormlb#37).
+        let Some(lb) = c.lb_front(Duration::from_secs(60)) else {
+            return gap(GAP_LB, "edge-lb has no LoadBalancer address after 60s (status.loadBalancer.ingress empty)");
         };
-        let r = http::get(&format!("http://{ip}/api/products"), Duration::from_secs(10)).map_err(|e| Bad::Fail(format!("{ip}: {e}")))?;
+        let r = lb.get("/api/products").map_err(|e| Bad::Gap(GAP_LB, format!("{}: {e}", lb.base)))?;
         if r.status == 200 && r.body_str().contains("ANV-001") {
-            Ok(format!("http://{ip}/api/products answered"))
+            Ok(format!("{}/api/products answered", lb.base))
         } else {
-            fail(format!("http://{ip}/api/products: {}", r.status))
+            gap(GAP_LB, format!("{}/api/products: {}", lb.base, r.status))
         }
+    });
+
+    t.run("loadbalancer-spread", || {
+        // Multiple frontends: both edge pods take the address's traffic, and
+        // each spreads it over every web and api pod.
+        let Some(lb) = c.lb_front(Duration::ZERO) else { return gap(GAP_LB, "edge-lb has no LoadBalancer address") };
+        let edges = c.pod_ips("edge").len();
+        let edge = lb.spread("/", "X-Served-By", edges, 120, None);
+        if edge.pods.len() < edges || !edge.failed.is_empty() {
+            return gap(GAP_LB, format!("{}/ reached edge pods {} of {edges}", lb.base, edge.show()));
+        }
+        let web = lb.spread("/", "X-Web-Pod", 3, 120, None);
+        let api = lb.spread("/api/products", "X-Api-Pod", 3, 120, None);
+        if web.pods.len() < 3 || api.pods.len() < 3 || !web.failed.is_empty() || !api.failed.is_empty() {
+            return fail(format!("through {}: web {} api {} (want 3 each)", lb.base, web.show(), api.show()));
+        }
+        Ok(format!("{}: edge {} web {} api {}", lb.base, edge.show(), web.show(), api.show()))
     });
 
     t.run("httproute", || {
@@ -565,6 +697,46 @@ fn checks(t: &mut Tally, c: &mut Ctx) {
             std::thread::sleep(Duration::from_secs(3));
         }
         fail(format!("Host {host} on {node}:80: {last}"))
+    });
+
+    t.run("httproute-backends", || {
+        // The route's rules are stormlb's backend config: `/` -> web and
+        // `/api/` -> api straight to the pods (no web hop), each spread over
+        // every ready pod, and the route's status written back.
+        let Some(route) = c.route_front() else { return Err(Bad::Skip("STORM_NODE is not set".into())) };
+        let mut gaps = Vec::new();
+        let web = route.spread("/", "X-Web-Pod", 3, 120, None);
+        if web.pods.len() < 3 || !web.failed.is_empty() {
+            gaps.push(format!("/ reached web pods {} (want 3)", web.show()));
+        }
+        let api = route.spread("/api/products", "X-Api-Pod", 3, 120, Some("X-Web-Pod"));
+        if api.pods.len() < 3 || !api.failed.is_empty() {
+            gaps.push(format!("/api/ reached api pods {} (want 3)", api.show()));
+        }
+        if api.via_absent > 0 {
+            gaps.push(format!("{} /api/ answers came through web: the router does not apply the /api/ rule", api.via_absent));
+        }
+        let status = match c.k.get(&format!("/apis/gateway.networking.k8s.io/v1/namespaces/{}/httproutes/storefront", c.ns)) {
+            Ok((200, v)) => v["status"].clone(),
+            other => return fail(format!("get httproute storefront: {other:?}")),
+        };
+        let conds: Vec<String> = status["parents"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|p| p["conditions"].as_array().cloned().unwrap_or_default())
+            .map(|c| format!("{}={}", c["type"].as_str().unwrap_or("?"), c["status"].as_str().unwrap_or("?")))
+            .collect();
+        for want in ["Accepted=True", "ResolvedRefs=True"] {
+            if !conds.iter().any(|c| c == want) {
+                gaps.push(format!("route status lacks {want} (has {conds:?})"));
+            }
+        }
+        write_result("httproute-status.json", &serde_json::to_string_pretty(&status).unwrap_or_default());
+        if !gaps.is_empty() {
+            return gap(GAP_LB, gaps.join("; "));
+        }
+        Ok(format!("web {} api {} (direct); status {}", web.show(), api.show(), conds.join(" ")))
     });
 
     t.run("metrics", || {
@@ -715,15 +887,23 @@ fn disruptions(t: &mut Tally, c: &mut Ctx, wave: u32) -> bool {
     });
 
     all &= t.run(&format!("pod-replaced{sfx}"), || {
+        // Killed under traffic on every way in: the edge's ClusterIP (the
+        // storefront's own balancing), and stormlb's address and route.
+        let mut fronts = vec![Front { label: "edge", base: c.edge_base()?, host: None }];
+        fronts.extend(c.lb_front(Duration::ZERO));
+        fronts.extend(c.route_front());
         let web = c.pods("web");
         let victim = web.first().and_then(|p| p["metadata"]["name"].as_str().map(str::to_string)).unwrap_or_default();
         c.delete_pod(&victim)?;
         let t0 = Instant::now();
-        let (mut ok, mut failed) = (0, 0);
+        let mut tally: Vec<(u32, Vec<String>)> = vec![(0, Vec::new()); fronts.len()];
         loop {
-            match c.edge("GET", "/", b"") {
-                Ok(r) if r.status == 200 => ok += 1,
-                _ => failed += 1,
+            for (f, (ok, failed)) in fronts.iter().zip(tally.iter_mut()) {
+                match f.get("/") {
+                    Ok(r) if r.status == 200 => *ok += 1,
+                    Ok(r) => failed.push(r.status.to_string()),
+                    Err(e) => failed.push(e),
+                }
             }
             let pods = c.pods("web");
             let live: Vec<&Value> = pods.iter().filter(|p| p["metadata"]["deletionTimestamp"].is_null()).collect();
@@ -735,10 +915,19 @@ fn disruptions(t: &mut Tally, c: &mut Ctx, wave: u32) -> bool {
             }
             std::thread::sleep(Duration::from_millis(500));
         }
-        if failed > 0 {
-            return fail(format!("{victim} replaced in {}s, but {failed} of {} requests failed meanwhile", t0.elapsed().as_secs(), ok + failed));
+        let secs = t0.elapsed().as_secs();
+        let report: Vec<String> = fronts
+            .iter()
+            .zip(&tally)
+            .map(|(f, (ok, failed))| format!("{}: {ok} answered, {} failed{}", f.label, failed.len(), failed.first().map(|e| format!(" ({e})")).unwrap_or_default()))
+            .collect();
+        if !tally[0].1.is_empty() {
+            return fail(format!("{victim} replaced in {secs}s, but requests failed: {}", report.join("; ")));
         }
-        Ok(format!("{victim} killed and replaced in {}s; all {ok} requests through the edge answered", t0.elapsed().as_secs()))
+        if tally.iter().any(|(_, failed)| !failed.is_empty()) {
+            return gap(GAP_LB, format!("{victim} replaced in {secs}s; stormlb did not drain it: {}", report.join("; ")));
+        }
+        Ok(format!("{victim} killed and replaced in {secs}s with no failed request: {}", report.join("; ")))
     });
 
     all &= t.run(&format!("scale-web{sfx}"), || {
@@ -747,6 +936,23 @@ fn disruptions(t: &mut Tally, c: &mut Ctx, wave: u32) -> bool {
             out.push(c.scale("web", n as u64)?);
             out.push(c.wait_ready("web", n, READY_TIMEOUT)?);
             out.push(c.edges_see("web", n, Duration::from_secs(90))?);
+            // stormlb's pool for the route's `/` rule follows too.
+            if let Some(route) = c.route_front() {
+                let t0 = Instant::now();
+                loop {
+                    let sp = route.spread("/", "X-Web-Pod", n, 40 * n, None);
+                    let live: BTreeSet<String> = c.pod_ips("web").into_iter().map(|(p, _)| p).collect();
+                    let stale: Vec<&String> = sp.pods.keys().filter(|p| !live.contains(*p)).collect();
+                    if sp.pods.len() == n && stale.is_empty() && sp.failed.is_empty() {
+                        out.push(format!("the route reaches all {n} web pods after {}s", t0.elapsed().as_secs()));
+                        break;
+                    }
+                    if t0.elapsed() > Duration::from_secs(90) {
+                        return gap(GAP_LB, format!("the route's pool did not follow web to {n}: {} (stale {stale:?})", sp.show()));
+                    }
+                    std::thread::sleep(Duration::from_secs(3));
+                }
+            }
         }
         Ok(out.join("; "))
     });
@@ -904,6 +1110,7 @@ fn medium(t: &mut Tally, k: Kube, waves: u32) -> Result<(), String> {
         container_ids: BTreeSet::new(),
         pv_names: BTreeSet::new(),
         edge_ip: None,
+        lb_ip: None,
         order_id: None,
     };
     if deploy(t, &mut c) {
@@ -932,7 +1139,7 @@ fn medium(t: &mut Tally, k: Kube, waves: u32) -> Result<(), String> {
             t.run("order-still-there", || match c.edge("GET", &format!("/api/orders/{id}"), b"") {
                 Ok(r) if r.status == 200 => Ok(format!("order {id} still readable after every disruption")),
                 Ok(r) => fail(format!("order {id}: {}", r.status)),
-                Err(Bad::Fail(e)) | Err(Bad::Skip(e)) => fail(e),
+                Err(Bad::Fail(e)) | Err(Bad::Skip(e)) | Err(Bad::Gap(_, e)) => fail(e),
             });
         }
     }

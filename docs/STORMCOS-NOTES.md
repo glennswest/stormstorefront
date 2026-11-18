@@ -27,10 +27,14 @@ nothing assigns a UID: the kubelet runs a container as the pod's
 `runAsUser`, else the image's `User`, else **0** — and a registry image (this
 one included) carries no `User`. With `runAsNonRoot: true` the kubelet then
 refuses the container ("runAsNonRoot is set and the container would run as
-root"). Whether stormcos takes on OpenShift's UID-range assignment (SCC is an
-open scope question, rustkube#70) is the owner's decision; until it is
-decided and done, these pods do not start as written. See the issue for the
-options.
+root").
+
+**Decided (master, 2026-11-18, option A on #1):** the platform assigns UIDs as
+`restricted-v2` does — each namespace gets a UID and supplemental-group
+range, and admission sets `runAsUser`/`fsGroup` from it (rustkube#321). The
+manifests stay as written. Until a release carries rustkube#321 the test's
+deploy steps fail as a **gap** naming it (`"gap": "rustkube#321"`), and pass
+unchanged once it is there.
 
 ## 2. Every listening port is above 1024
 
@@ -45,24 +49,41 @@ only as the LoadBalancer Service's port. `validate` checks every
 The original's OpenShift **Route** is a Gateway API **HTTPRoute** here:
 stormcos's router is stormlb on every node's :80
 (stormcos `deploy/manifests/85-routes.yaml`), which demuxes on the `Host`
-header. What stormlb does with it:
+header. stormlb is the edge on stormcos (stormlb#37): the route's rules are
+its **backend config** — `/` → `web:8080`, `/api/` → `api:8081`, each with a
+`weight`, a request timeout, and each backend's health taken from its pods'
+readiness. So the route reaches web and api directly; the LoadBalancer
+address reaches the edge pods, which route the same way themselves. Two
+frontends, one set of pods.
 
-- an **exact hostname** match (no wildcards), the first rule's first
-  `backendRef`, resolved to the Service's clusterIP;
+- `/` → web is the first rule on purpose: a router that only reads the first
+  rule's first `backendRef` (stormlb before #37) still serves everything,
+  because web proxies `/api/` to api itself;
+- the router runs on the host, which Cilium admits to local pods as host
+  traffic, so the default-deny NetworkPolicies need no hole for it (web and
+  api still admit only the edge from other pods);
 - **no TLS termination** for a pod's route: the original's
-  `termination: edge` has no equivalent yet; the route is plain HTTP;
-- no path matching (the edge does the path routing anyway).
+  `termination: edge` has no equivalent yet; the route is plain HTTP.
+
+What the test asks of stormlb (a **gap** naming stormlb#37 where it is not
+there yet): `/` spread over every web pod and `/api/` over every api pod
+with no web hop, the route's `status.parents[].conditions` showing
+`Accepted` and `ResolvedRefs`, a web pod killed with no failed request
+through the route or the address, and the route's pool following web
+3→6→3.
 
 The hostname is `storefront.storm1.g8.lo`; the wildcard `*.storm1.<zone>`
 resolves to the node. Until microdns#12 (wildcard answers' owner name),
 strict resolvers may drop the answer: `curl -H 'Host: storefront.storm1.g8.lo'
 http://<node>/` proves the path meanwhile, and the test does exactly that.
 
-The **LoadBalancer** Service takes an address from the site's pool
-(install-config `networking.loadBalancerPool`, stormcos#215): Cilium's
-LB-IPAM assigns it and the node answers ARP for it. A machine without a pool
-leaves `edge-lb` `<pending>`, as on CRC without MetalLB; the test reports that
-check `skip`, never pass.
+The **LoadBalancer** Service takes an address from the node's `lb_pool`,
+which stormlb allocates and writes to `status.loadBalancer.ingress`
+(stormlb#37), its backend pool the edge pods' endpoints, followed live, with
+`externalTrafficPolicy: Local` keeping the client address. The test requires
+both edge pods to take the address's traffic and every web and api pod to be
+reached through it. Until stormlb#37 is released `edge-lb` stays `<pending>`
+and those checks fail as a gap naming stormlb#37, never pass.
 
 ## 4. Pod Security Admission labels
 
