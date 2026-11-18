@@ -48,7 +48,7 @@ behave like OpenShift.
                     │ └─ backup          │  └─────────────────────┘
                     │ PVC data   1Gi     │
                     │ PVC backups 1Gi    │
-                    │ (stormblock-csi)   │
+                    │ (stormblock)       │
                     └────────────────────┘
 ```
 
@@ -147,13 +147,14 @@ scripts/      validate, make-secrets, deploy, smoke-test
 test/         stormstorefront-test (Containerfile, build.sh, requires.toml, src/)
 deploy/       check.sh — the full sc-build check
 docs/         ARCHITECTURE.md (why it is shaped this way)
+              CONFIGURATION.md (env keys, defaults, ports, APIs, edge.toml)
               STORMCOS-NOTES.md (what differs from OpenShift, and the traps)
 ```
 
 ## Requirements
 
 - stormcos with rustkube, stormlb's router (for the HTTPRoute) and
-  stormblock-csi (the default StorageClass `stormblock`, for the two PVCs).
+  the built-in stormblock driver (the default StorageClass `stormblock`, for the two PVCs).
 - The `stormstorefront` image in the node's release (or its registry).
 - A LoadBalancer pool (install-config `networking.loadBalancerPool`) for
   `svc/edge-lb`; without one it stays `<pending>` — use the HTTPRoute, or

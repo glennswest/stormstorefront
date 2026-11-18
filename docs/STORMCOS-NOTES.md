@@ -119,9 +119,9 @@ storefront gets scraped on a node. "The monitoring stack" in the
 NetworkPolicies is a namespace labelled `storm.io/policy-group: monitoring`;
 the node's own ironprom scrapes from the host network, which Cilium admits.
 
-## 11. Storage: stormblock-csi
+## 11. Storage: the stormblock driver
 
-Both PVCs use the default StorageClass, `stormblock` (stormblock-csi,
+Both PVCs use the default StorageClass, `stormblock` (the built-in stormblock driver,
 `WaitForFirstConsumer`, `reclaimPolicy: Delete`). Deleting the claims
 deletes their volumes; the test then checks that no PersistentVolume and no
 engine volume (`storage.storm.io/v1`) still names a claim, a container or the

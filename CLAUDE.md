@@ -46,7 +46,7 @@ src/sidecars.rs    access-log, cache-warmer, wait-for-deps, backup, reloader hel
 src/validate.rs    the offline manifest checks (scripts/validate.sh runs them)
 manifests/         numbered for apply order; kustomization.yaml ties them together
 test/              stormstorefront-test: /test short|medium|long (test standard)
-docs/              ARCHITECTURE.md, STORMCOS-NOTES.md
+docs/              ARCHITECTURE.md, CONFIGURATION.md, STORMCOS-NOTES.md, research/
 ```
 
 ## Work plan

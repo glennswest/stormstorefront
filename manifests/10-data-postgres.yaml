@@ -21,7 +21,7 @@ data:
     }
 ---
 # Backups live on their own claim so the database volume can be resized or
-# restored without taking the dumps with it. stormblock-csi (the default
+# restored without taking the dumps with it. the built-in stormblock driver (the default
 # StorageClass, `stormblock`) provisions it.
 apiVersion: v1
 kind: PersistentVolumeClaim

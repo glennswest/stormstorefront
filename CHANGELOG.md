@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-11-18
+- **docs:** docs/CONFIGURATION.md (env keys and defaults, ports, edge.toml, api and store endpoints) from the code; storage described as the built-in stormblock driver, not stormblock-csi (README, ARCHITECTURE, STORMCOS-NOTES, manifest comment); layout lists updated.
 - **feat:** `stormstorefront`, one static Rust binary with every container's
   role (#1): `edge` (L7 path routing, per-pod balancing over headless DNS,
   health checks, cookie affinity, least-connections, retries, seamless

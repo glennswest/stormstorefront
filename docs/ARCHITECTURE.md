@@ -72,7 +72,7 @@ pending pod, `content-init` puts content in place before the first request.
 
 | State | Where | Survives pod restart? |
 |---|---|---|
-| Catalog and orders | the store, PVC `data` (1Gi, stormblock-csi) | yes — the test proves it |
+| Catalog and orders | the store, PVC `data` (1Gi, built-in stormblock driver) | yes — the test proves it |
 | Logical backups | PVC `postgres-backups` (1Gi) | yes |
 | Catalog cache | the cache's memory | no — by design |
 | Rendered site | `emptyDir`, regenerated every 30 s | no — by design |
