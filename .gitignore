@@ -1,0 +1,29 @@
+# Secrets and environment
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/
+manifests/03-secrets.local.yaml
+
+# IDE and OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+target/
+dist/
+build/
+test/.stage/
+
+# Logs and temp
+*.log
+tmp/
+temp/
