@@ -51,6 +51,9 @@ docs/              ARCHITECTURE.md, CONFIGURATION.md, STORMCOS-NOTES.md, researc
 
 ## Work plan
 
+### #7 — store order-id reuse (P1, finding 0f9a8d59a92b)
+- [ ] reserve id before publishing, no-clobber order files, recover sequence on open; tests; sc-build deploy/check.sh
+
 ### #1 — the storefront on stormcos (P0)
 - [x] Rust binary with every role (src/), 29 unit tests
 - [x] manifests (same topology as the original, stormcos substitutions)

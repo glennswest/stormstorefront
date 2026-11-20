@@ -133,7 +133,9 @@ there are nodes to spread over.
 
 - **Single store replica**, no replication or failover; **single cache**.
 - **The store is not PostgreSQL.** It is a JSON document store with the
-  durability the example needs (atomic writes, a seed, backups). fastetcd is
+  durability the example needs (atomic writes, a seed, backups; an order
+  id is reserved before its order is written, order files are never
+  overwritten, and the sequence is recovered from the orders on open). fastetcd is
   the platform's durable store, but it is the control plane's; an app tier
   with its own data on its own PVC is the point of the example.
 - **CPU-based autoscaling**, as the original.

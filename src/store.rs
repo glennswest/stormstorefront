@@ -20,7 +20,11 @@
 //! `seed.json` (as the original's `seed.sql` runs from
 //! /docker-entrypoint-initdb.d). Every write is a file written beside its
 //! target, synced and renamed into place, so a pod killed mid-write leaves the
-//! old version or the new one, never half of one.
+//! old version or the new one, never half of one. An order is published with
+//! no-clobber semantics (a hard link of the synced temp file, which fails if
+//! the name exists), after its id is reserved in `next_order`; on open the
+//! sequence is recovered as past the highest order on disk. So a stop between
+//! the two writes can skip an id but never reuse one or overwrite an order.
 //!
 //! Counters are on loopback only (`STATS_LISTEN`, default 127.0.0.1:5433,
 //! `/stats`) for the `exporter` sidecar, as postgres_exporter reads postgres
@@ -64,6 +68,40 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// Writes `data` to `path` atomically and only if `path` does not exist: a
+/// sibling temp file, fsync, hard link to `path` (refused with `AlreadyExists`
+/// if it is taken), unlink the temp file. Never replaces an existing file.
+pub fn write_new(path: &Path, data: &[u8]) -> io::Result<()> {
+    let tmp = path.with_extension("new");
+    {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+    }
+    let linked = fs::hard_link(&tmp, path);
+    let _ = fs::remove_file(&tmp);
+    linked?;
+    if let Some(dir) = path.parent() {
+        if let Ok(d) = fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    Ok(())
+}
+
+/// The highest order id with a file in `orders/`, 0 when there is none.
+fn highest_order(orders: &Path) -> io::Result<u64> {
+    Ok(fs::read_dir(orders)?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_suffix(".json")).and_then(|n| n.parse::<u64>().ok()))
+        .max()
+        .unwrap_or(0))
+}
+
+fn read_seq(path: &Path) -> u64 {
+    fs::read_to_string(path).ok().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(1).max(1)
+}
+
 fn read_json(path: &Path) -> io::Result<Value> {
     let raw = fs::read(path)?;
     serde_json::from_slice(&raw).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{}: {e}", path.display())))
@@ -105,6 +143,13 @@ impl Store {
         }
         let boots = fs::read_to_string(dir.join("boots")).ok().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0) + 1;
         write_atomic(&dir.join("boots"), boots.to_string().as_bytes())?;
+        // Recover the order sequence: never behind an order already on disk.
+        let seq = dir.join("next_order");
+        let recorded = seq.exists().then(|| read_seq(&seq));
+        let next = recorded.unwrap_or(1).max(highest_order(&dir.join("orders"))? + 1);
+        if recorded != Some(next) {
+            write_atomic(&seq, next.to_string().as_bytes())?;
+        }
         Ok(Store {
             dir: dir.to_path_buf(),
             token,
@@ -154,19 +199,30 @@ impl Store {
         };
         let _guard = self.write_lock.lock().unwrap_or_else(|p| p.into_inner());
         let seq = self.dir.join("next_order");
-        let id = fs::read_to_string(&seq).ok().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(1);
-        let order = json!({
-            "id": id,
-            "sku": sku,
-            "name": product["name"],
-            "qty": qty,
-            "total_cents": product["price_cents"].as_u64().unwrap_or(0) * qty,
-            "created_at": util::rfc3339(util::unix_now()),
-        });
-        write_atomic(&self.order_path(id), serde_json::to_vec_pretty(&order)?.as_slice())?;
-        write_atomic(&seq, (id + 1).to_string().as_bytes())?;
-        self.orders_created.fetch_add(1, Ordering::Relaxed);
-        Ok(Ok(order))
+        let mut id = read_seq(&seq);
+        loop {
+            // Reserve the id before publishing the order: a stop after this
+            // write skips an id, it never hands one out twice.
+            write_atomic(&seq, (id + 1).to_string().as_bytes())?;
+            let order = json!({
+                "id": id,
+                "sku": sku,
+                "name": product["name"],
+                "qty": qty,
+                "total_cents": product["price_cents"].as_u64().unwrap_or(0) * qty,
+                "created_at": util::rfc3339(util::unix_now()),
+            });
+            match write_new(&self.order_path(id), serde_json::to_vec_pretty(&order)?.as_slice()) {
+                Ok(()) => {
+                    self.orders_created.fetch_add(1, Ordering::Relaxed);
+                    return Ok(Ok(order));
+                }
+                // An order already holds this id (a sequence file behind the
+                // orders): never overwrite it, take the next id.
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => id += 1,
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     pub fn dump(&self) -> io::Result<Value> {
@@ -191,7 +247,9 @@ impl Store {
     }
 
     pub fn stats_text(&self) -> String {
-        let orders = fs::read_dir(self.dir.join("orders")).map(|d| d.count()).unwrap_or(0);
+        let orders = fs::read_dir(self.dir.join("orders"))
+            .map(|d| d.filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().ends_with(".json")).count())
+            .unwrap_or(0);
         format!(
             "up 1\nuptime_seconds {}\nboots_total {}\nrequests_total {}\norders_created_total {}\norders {}\nauth_failures_total {}\n",
             self.started.elapsed().as_secs(),
@@ -333,6 +391,55 @@ mod tests {
         assert_eq!(s.handle(&authed("GET", "/v1/products/ANV-001", b"")).status, 200);
         let dump = s.handle(&authed("GET", "/v1/dump", b""));
         assert!(dump.body_str().contains("initialized_at"));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    fn order_id(r: &Response) -> u64 {
+        serde_json::from_slice::<Value>(&r.body).unwrap()["id"].as_u64().unwrap()
+    }
+
+    /// Finding 0f9a8d59a92b: an order on disk with `next_order` still holding
+    /// its id (a stop between the two writes) must not be overwritten.
+    #[test]
+    fn a_stale_sequence_never_overwrites_an_order() {
+        let base = tmpdir("stale-seq");
+        let data = base.join("data");
+        let s = Store::open(&data, Some(&seed(&base)), Some("pw".into())).unwrap();
+        let first = s.handle(&authed("POST", "/v1/orders", br#"{"sku":"ANV-001","qty":2}"#));
+        assert_eq!(order_id(&first), 1);
+        let saved = fs::read(data.join("orders/0000000001.json")).unwrap();
+        // The stop: the order was published, the sequence never advanced.
+        fs::write(data.join("next_order"), b"1").unwrap();
+        // Without a restart: create_order must skip the taken id.
+        let r = s.handle(&authed("POST", "/v1/orders", br#"{"sku":"ANV-001","qty":3}"#));
+        assert_eq!(r.status, 201, "{}", r.body_str());
+        assert_eq!(order_id(&r), 2);
+        assert_eq!(fs::read(data.join("orders/0000000001.json")).unwrap(), saved);
+        drop(s);
+        // With a restart: open recovers the sequence from the orders on disk.
+        fs::write(data.join("next_order"), b"1").unwrap();
+        let s = Store::open(&data, None, Some("pw".into())).unwrap();
+        assert_eq!(fs::read_to_string(data.join("next_order")).unwrap(), "3");
+        let r = s.handle(&authed("POST", "/v1/orders", br#"{"sku":"ANV-001","qty":1}"#));
+        assert_eq!(order_id(&r), 3);
+        assert_eq!(fs::read(data.join("orders/0000000001.json")).unwrap(), saved);
+        assert_eq!(s.orders().unwrap().len(), 3);
+        // A missing sequence file recovers too.
+        fs::remove_file(data.join("next_order")).unwrap();
+        drop(s);
+        let s = Store::open(&data, None, Some("pw".into())).unwrap();
+        assert_eq!(order_id(&s.handle(&authed("POST", "/v1/orders", br#"{"sku":"ANV-001","qty":1}"#))), 4);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn write_new_refuses_an_existing_file() {
+        let base = tmpdir("write-new");
+        let f = base.join("x.json");
+        write_new(&f, b"one").unwrap();
+        assert_eq!(write_new(&f, b"two").unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&f).unwrap(), b"one");
+        assert!(!base.join("x.new").exists());
         let _ = fs::remove_dir_all(&base);
     }
 

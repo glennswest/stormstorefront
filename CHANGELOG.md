@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-11-20
+- **fix:** store: a restart can no longer reuse an order id and overwrite a saved order (#7, finding 0f9a8d59a92b). `create_order` reserves the id in `next_order` before publishing the order; the order file is published no-clobber (hard link of the synced temp file), taking the next id if one is taken; `Store::open` recovers the sequence past the highest order on disk. `orders` in `/stats` counts order files only.
+
 ### 2026-11-18
 - **feat:** stormlb as the edge (#1, stormlb#37): the HTTPRoute is stormlb's backend config (`/` → web, `/api/` → api, weights, timeouts, readiness as health); the LoadBalancer address is stormlb's. The test adds `loadbalancer-spread` (both edge pods, every web and api pod through the address) and `httproute-backends` (every web and api pod through the route, no web hop on `/api/`, route status `Accepted`/`ResolvedRefs`); `pod-replaced` kills a web pod under traffic on the edge, the address and the route; `scale-web` checks the route's pool follows 3→6→3.
 - **feat:** test gaps: a failure caused by an unreleased platform piece names it (`"gap": "rustkube#321"` when pods are refused as root, `"gap": "stormlb#37"` for the address and the route); the LoadBalancer check fails as a gap instead of skipping.
