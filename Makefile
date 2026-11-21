@@ -22,7 +22,9 @@ deploy: ## Apply in dependency order and wait for each tier
 	@CLI=$(CLI) NS=$(NS) ./scripts/deploy.sh
 
 .PHONY: apply
-apply: ## Apply everything at once (sc apply -k manifests/)
+apply: ## Apply everything at once (sc apply -k manifests/; needs make secrets)
+	@test -f manifests/03-secrets.local.yaml || { echo "no manifests/03-secrets.local.yaml: run 'make secrets'" >&2; exit 1; }
+	@! grep -q CHANGEME manifests/03-secrets.local.yaml || { echo "manifests/03-secrets.local.yaml holds placeholders: FORCE=1 make secrets" >&2; exit 1; }
 	@$(CLI) apply -k manifests/
 
 .PHONY: test
@@ -49,7 +51,9 @@ forward: ## Port-forward the edge to http://127.0.0.1:8080
 
 .PHONY: undeploy
 undeploy: ## Delete everything except the project and its PVCs
-	@$(CLI) delete -k manifests --ignore-not-found
+	@for f in manifests/[0-9]*.yaml; do \
+	  case $$f in */00-namespace.yaml) ;; *) $(CLI) delete -f "$$f" --ignore-not-found ;; esac; \
+	done
 	@echo "PVCs kept. Remove them with: $(CLI) -n $(NS) delete pvc --all"
 
 .PHONY: destroy

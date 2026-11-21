@@ -82,7 +82,7 @@ Every container is `image: stormstorefront`, `command: ["/bin/stormstorefront", 
 ## Quick start (sc)
 
 ```bash
-make secrets     # random values into manifests/03-secrets.local.yaml (gitignored)
+make secrets     # random values into manifests/03-secrets.local.yaml (gitignored; never overwritten)
 make validate    # offline checks — YAML, embedded configs, restricted hygiene, images
 make deploy      # sc apply in dependency order, waiting for each tier
 NODE=<node> make test   # through the LoadBalancer address and the HTTPRoute host
@@ -92,6 +92,7 @@ make status
 Or by hand, as on OpenShift:
 
 ```bash
+make secrets                                  # first: kustomization.yaml applies the generated file
 sc apply -k manifests/
 sc get pods -n storefront                     # every pod n/n Ready
 sc logs <api pod> -c access-log -n storefront

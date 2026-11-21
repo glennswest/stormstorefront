@@ -3,13 +3,18 @@ kind: Kustomization
 
 # `sc apply -k manifests/` applies the whole project. Every file is listed;
 # `stormstorefront validate` fails if one is not.
+#
+# The Secrets come from 03-secrets.local.yaml, which `make secrets` generates
+# with random values (gitignored). Until it exists, apply -k fails on the
+# missing resource: the committed 03-secrets.yaml holds public CHANGEME
+# placeholders and is never part of this list (validate refuses it).
 namespace: storefront
 
 resources:
   - 00-namespace.yaml
   - 01-quota-limits.yaml
   - 02-rbac.yaml
-  - 03-secrets.yaml
+  - 03-secrets.local.yaml
   - 04-config-edge.yaml
   - 05-config-web.yaml
   - 06-config-api.yaml

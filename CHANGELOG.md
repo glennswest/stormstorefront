@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-11-20
+- **fix:** `sc apply -k manifests/` no longer deploys the public CHANGEME passwords (#8, finding 1bcf68f63658). `kustomization.yaml` lists the generated `03-secrets.local.yaml` instead of `03-secrets.yaml`, so apply -k fails until `make secrets` has run; `validate` refuses a kustomization listing the placeholders (or not listing the generated file), a placeholder left in the generated file, and a Secret in any other manifest. `scripts/deploy.sh` applies the generated file or keeps the project's existing Secrets, and fails otherwise (it applied the placeholders with a warning); `make apply` checks first; `make secrets` never overwrites an existing file (`FORCE=1` does), so a re-run cannot rotate passwords under a running project. `make undeploy` deletes file by file (it no longer needs the generated file) and keeps the project, as it says.
 - **fix:** store: a restart can no longer reuse an order id and overwrite a saved order (#7, finding 0f9a8d59a92b). `create_order` reserves the id in `next_order` before publishing the order; the order file is published no-clobber (hard link of the synced temp file), taking the next id if one is taken; `Store::open` recovers the sequence past the highest order on disk. `orders` in `/stats` counts order files only.
 
 ### 2026-11-18

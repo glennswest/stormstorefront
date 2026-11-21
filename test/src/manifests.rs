@@ -3,7 +3,10 @@
 
 use serde_json::{json, Value};
 
-/// Every manifest, as kustomization.yaml lists them (validate checks it).
+/// Every committed manifest (validate checks the kustomization lists them).
+/// The kustomization applies the generated 03-secrets.local.yaml, never the
+/// placeholders; the test applies 03-secrets.yaml with per-run random values
+/// in their place (`Overlay::apply`).
 pub const FILES: &[(&str, &str)] = &[
     ("00-namespace.yaml", include_str!("../../manifests/00-namespace.yaml")),
     ("01-quota-limits.yaml", include_str!("../../manifests/01-quota-limits.yaml")),

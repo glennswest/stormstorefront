@@ -125,6 +125,14 @@ there are nodes to spread over.
   Role is read-only, namespace-scoped and excludes Secrets.
 - Secrets are referenced by `secretKeyRef`. The store requires its password
   as a bearer token on every `/v1/` call; the cache requires `AUTH`.
+- No known password is deployable. The committed `03-secrets.yaml` holds
+  public `CHANGEME` placeholders and is never in `kustomization.yaml`, which
+  lists the generated `03-secrets.local.yaml` (`make secrets`, gitignored,
+  never overwritten) instead: `sc apply -k manifests/` fails until it exists.
+  `scripts/deploy.sh` applies the generated file or keeps Secrets already in
+  the project, and refuses otherwise. `stormstorefront validate` enforces it:
+  the placeholders listed, a placeholder left in the generated file, or a
+  Secret in any other manifest is an error.
 - Every container: no privilege escalation, every capability dropped, a
   read-only root filesystem (the original needs a writable one for nginx and
   PostgreSQL; nothing here writes outside its volumes).

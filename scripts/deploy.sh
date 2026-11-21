@@ -12,12 +12,24 @@ CLI=${CLI:-sc}
 NS=${NS:-storefront}
 command -v "$CLI" >/dev/null || { echo "$CLI not found on PATH" >&2; exit 1; }
 
-secrets="$root/manifests/03-secrets.yaml"
-if [ -f "$root/manifests/03-secrets.local.yaml" ]; then
-    secrets="$root/manifests/03-secrets.local.yaml"
+# Real credentials or nothing: the committed 03-secrets.yaml holds public
+# CHANGEME placeholders and is never applied. Either the generated file
+# (`make secrets`) or Secrets already in the project (made by hand or by the
+# cluster's secret store, kept as they are).
+local_secrets="$root/manifests/03-secrets.local.yaml"
+if [ -f "$local_secrets" ]; then
+    if grep -q CHANGEME "$local_secrets"; then
+        echo "$local_secrets still holds CHANGEME placeholders; run 'FORCE=1 make secrets'" >&2
+        exit 1
+    fi
     echo "==> using generated secrets"
+elif "$CLI" -n "$NS" get secret storefront-db >/dev/null 2>&1 \
+     && "$CLI" -n "$NS" get secret storefront-cache >/dev/null 2>&1; then
+    local_secrets=
+    echo "==> using the project's existing secrets"
 else
-    echo "==> WARNING: applying placeholder secrets. Run 'make secrets' first."
+    echo "no credentials: run 'make secrets' (or create storefront-db and storefront-cache in $NS)" >&2
+    exit 1
 fi
 
 apply() { echo "==> apply $(basename "$1")"; "$CLI" apply -f "$1"; }
@@ -25,7 +37,7 @@ apply() { echo "==> apply $(basename "$1")"; "$CLI" apply -f "$1"; }
 apply "$root/manifests/00-namespace.yaml"
 apply "$root/manifests/01-quota-limits.yaml"
 apply "$root/manifests/02-rbac.yaml"
-apply "$secrets"
+[ -n "$local_secrets" ] && apply "$local_secrets"
 for f in 04-config-edge 05-config-web 06-config-api; do
     apply "$root/manifests/$f.yaml"
 done
