@@ -51,6 +51,9 @@ docs/              ARCHITECTURE.md, CONFIGURATION.md, STORMCOS-NOTES.md, researc
 
 ## Work plan
 
+### #8 — apply -k deploys placeholder passwords (P1, finding 1bcf68f63658)
+- [ ] kustomization lists the generated 03-secrets.local.yaml, never the placeholders; validate enforces it (and no CHANGEME in the local file); deploy.sh/make apply refuse without real secrets; make-secrets never overwrites; tests; sc-build deploy/check.sh
+
 ### #7 — store order-id reuse (P1, finding 0f9a8d59a92b)
 - [ ] reserve id before publishing, no-clobber order files, recover sequence on open; tests; sc-build deploy/check.sh
 
